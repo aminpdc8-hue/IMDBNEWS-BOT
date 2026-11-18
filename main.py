@@ -257,3 +257,178 @@ def get_news():
             )
 
     return articles
+
+# =====================================
+# TELEGRAM API
+# =====================================
+
+def telegram_request(method, data):
+
+    url = (
+        f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    )
+
+    response = requests.post(
+        url,
+        data=data,
+        timeout=60
+    )
+
+    response.raise_for_status()
+
+    result = response.json()
+
+    if not result.get("ok"):
+        raise RuntimeError(str(result))
+
+    return result
+
+
+def send_message(message):
+
+    telegram_request(
+        "sendMessage",
+        {
+            "chat_id": CHANNEL_ID,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+    )
+
+
+def send_photo(image_url, caption):
+
+    telegram_request(
+        "sendPhoto",
+        {
+            "chat_id": CHANNEL_ID,
+            "photo": image_url,
+            "caption": caption,
+            "parse_mode": "HTML"
+        }
+    )
+
+
+# =====================================
+# MESSAGE BUILDER
+# =====================================
+
+def build_message(article, fa_title, fa_summary):
+
+    original_title = html.escape(article["title"])
+    original_summary = html.escape(article["summary"])
+
+    translated_title = html.escape(fa_title)
+    translated_summary = html.escape(fa_summary)
+
+    source = html.escape(article["source"])
+
+    link = html.escape(
+        article["link"],
+        quote=True
+    )
+
+    message = (
+        "🎬 <b>IMDBNEWS | اخبار سینمای جهان</b>\n\n"
+
+        "🇬🇧 <b>ORIGINAL NEWS</b>\n"
+
+        f"<b>{original_title}</b>\n\n"
+
+        f"{original_summary}\n\n"
+
+        "━━━━━━━━━━━━━━\n\n"
+
+        "🇮🇷 <b>ترجمه فارسی</b>\n"
+
+        f"<b>{translated_title}</b>\n\n"
+
+        f"{translated_summary}\n\n"
+
+        f"📰 منبع: {source}\n"
+
+        f'<a href="{link}">🔗 مشاهده خبر اصلی</a>\n\n'
+
+        "📢 @IMDBNEWS_FA"
+    )
+
+    return message
+
+
+# =====================================
+# PUBLISH NEWS
+# =====================================
+
+def publish_article(article):
+
+    print("Processing:", article["title"])
+
+    fa_title = translate(
+        article["title"]
+    )
+
+    if not fa_title:
+        raise RuntimeError("Title translation failed")
+
+    original_summary = article["summary"][:1200]
+
+    fa_summary = translate(
+        original_summary
+    ) if original_summary else ""
+
+    if original_summary and not fa_summary:
+        raise RuntimeError("Summary translation failed")
+
+    message = build_message(
+        article,
+        fa_title,
+        fa_summary or ""
+    )
+
+    image_url = article.get("image")
+
+    if image_url and len(message) <= 1000:
+
+        try:
+
+            send_photo(
+                image_url,
+                message
+            )
+
+            print("Photo published")
+
+        except Exception as error:
+
+            print("Photo error:", str(error))
+
+            send_message(message)
+
+    elif image_url:
+
+        try:
+
+            caption = (
+                "🎬 <b>IMDBNEWS</b>\n"
+                f"<b>{html.escape(fa_title)}</b>"
+            )
+
+            send_photo(
+                image_url,
+                caption
+            )
+
+            send_message(message)
+
+        except Exception as error:
+
+            print("Photo error:", str(error))
+
+            send_message(message)
+
+    else:
+
+        send_message(message)
+
+    print("News published:", article["title"])
