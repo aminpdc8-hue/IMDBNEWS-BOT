@@ -7,30 +7,31 @@ import hashlib
 import requests
 import feedparser
 
-from urllib.parse import urlparse
+from io import BytesIO
+from html.parser import HTMLParser
+from PIL import Image
 
 
-# ==========================================
-# IMDBNEWS BOT - CONFIG
-# ==========================================
+# =====================================
+# CONFIG
+# =====================================
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
-TRANSLATION_EMAIL = os.getenv("TRANSLATION_EMAIL", "")
 
-MAX_NEWS = 5
 DATABASE = "published.json"
+MAX_NEWS = 5
+
+API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 }
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-
-# ==========================================
-# NEWS SOURCES
-# ==========================================
+# =====================================
+# SOURCES
+# =====================================
 
 SOURCES = [
     {
@@ -42,28 +43,18 @@ SOURCES = [
     },
     {
         "name": "Variety",
-        "urls": [
-            "https://variety.com/feed/"
-        ]
+        "urls": ["https://variety.com/feed/"]
     },
     {
         "name": "Deadline",
-        "urls": [
-            "https://deadline.com/feed/"
-        ]
+        "urls": ["https://deadline.com/feed/"]
     },
     {
         "name": "Hollywood Reporter",
-        "urls": [
-            "https://www.hollywoodreporter.com/feed/"
-        ]
+        "urls": ["https://www.hollywoodreporter.com/feed/"]
     }
 ]
 
-
-# ==========================================
-# MOVIE KEYWORDS
-# ==========================================
 
 KEYWORDS = [
     "movie", "film", "cinema", "hollywood",
@@ -71,70 +62,93 @@ KEYWORDS = [
     "trailer", "cast", "release date",
     "netflix", "amazon", "prime video",
     "disney", "warner", "paramount",
-    "universal", "sony pictures",
-    "box office", "series", "season",
-    "horror", "thriller", "comedy",
-    "drama", "action", "sci-fi",
-    "fantasy", "animation",
+    "universal", "box office", "series",
+    "season", "horror", "thriller",
+    "comedy", "drama", "action",
+    "sci-fi", "fantasy", "animation",
     "oscars", "emmy", "golden globe",
-    "friday the 13th", "jason",
-    "marvel", "dc studios"
+    "marvel", "dc studios",
+    "friday the 13th", "jason"
 ]
 
 
-# ==========================================
-# DATABASE
-# ==========================================
+# =====================================
+# HTML ARTICLE EXTRACTOR
+# =====================================
 
-def load_database():
-    if not os.path.exists(DATABASE):
-        return []
+class ArticleParser(HTMLParser):
 
-    try:
-        with open(DATABASE, "r", encoding="utf-8") as file:
-            data = json.load(file)
+    def __init__(self):
+        super().__init__()
 
-        if isinstance(data, list):
-            return data
+        self.paragraphs = []
+        self.current = ""
+        self.in_paragraph = False
+        self.skip = False
+        self.description = ""
 
-        return []
+    def handle_starttag(self, tag, attrs):
 
-    except Exception:
-        return []
+        attrs = dict(attrs)
+
+        if tag in ["script", "style", "nav", "footer", "header"]:
+            self.skip = True
+
+        if tag == "meta":
+
+            name = (
+                attrs.get("property")
+                or attrs.get("name")
+                or ""
+            ).lower()
+
+            if name in [
+                "og:description",
+                "description",
+                "twitter:description"
+            ]:
+
+                value = attrs.get("content", "")
+
+                if value and len(value) > len(self.description):
+                    self.description = value
+
+        if tag == "p" and not self.skip:
+            self.in_paragraph = True
+            self.current = ""
+
+    def handle_data(self, data):
+
+        if self.skip:
+            return
+
+        if self.in_paragraph:
+            self.current += " " + data
+
+    def handle_endtag(self, tag):
+
+        if tag in ["script", "style", "nav", "footer", "header"]:
+            self.skip = False
+
+        if tag == "p":
+
+            text = clean_text(self.current)
+
+            if len(text) > 60:
+                self.paragraphs.append(text)
+
+            self.current = ""
+            self.in_paragraph = False
 
 
-def save_database(data):
-    try:
-        data = data[-1000:]
-
-        with open(DATABASE, "w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
-
-    except Exception as error:
-        print("Database save error:", error)
-
-
-# ==========================================
-# TEXT CLEANING
-# ==========================================
+# =====================================
+# TEXT CLEANER
+# =====================================
 
 def clean_text(text):
+
     if not text:
         return ""
-
-    text = re.sub(
-        r"<script.*?</script>",
-        "",
-        text,
-        flags=re.I | re.S
-    )
-
-    text = re.sub(
-        r"<style.*?</style>",
-        "",
-        text,
-        flags=re.I | re.S
-    )
 
     text = re.sub(r"<[^>]+>", " ", text)
 
@@ -145,72 +159,92 @@ def clean_text(text):
     return text.strip()
 
 
-def telegram_safe(text):
-    return html.escape(str(text or ""), quote=False)
+def limit_words(text, maximum=120):
+
+    words = text.split()
+
+    if len(words) <= maximum:
+        return text
+
+    return " ".join(words[:maximum]).rstrip(" ,.-") + "..."
 
 
-# ==========================================
+# =====================================
+# DATABASE
+# =====================================
+
+def load_database():
+
+    try:
+
+        with open(DATABASE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        return data if isinstance(data, list) else []
+
+    except Exception:
+        return []
+
+
+def save_database(data):
+
+    with open(DATABASE, "w", encoding="utf-8") as f:
+
+        json.dump(
+            data[-1000:],
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
+def make_id(article):
+
+    value = article.get("id") or article["link"]
+
+    return hashlib.sha256(
+        value.encode("utf-8")
+    ).hexdigest()
+
+
+# =====================================
 # IMAGE EXTRACTION
-# ==========================================
+# =====================================
 
 def get_image(entry):
 
-    # media:content / media:thumbnail
     for key in ["media_content", "media_thumbnail"]:
 
         items = entry.get(key, [])
 
-        if isinstance(items, list):
+        for item in items:
 
-            for item in items:
+            url = item.get("url")
 
-                url = item.get("url")
+            if url and url.startswith("http"):
+                return url
 
-                if url and url.startswith("http"):
-                    return url
-
-    # Enclosure
-    enclosures = entry.get("enclosures", [])
-
-    for item in enclosures:
+    for item in entry.get("enclosures", []):
 
         url = item.get("href") or item.get("url")
 
         if url and url.startswith("http"):
             return url
 
-    # RSS thumbnail
-    thumbnail = entry.get("image")
-
-    if isinstance(thumbnail, dict):
-
-        url = thumbnail.get("href") or thumbnail.get("url")
-
-        if url and url.startswith("http"):
-            return url
-
-    # HTML content
-    content = entry.get("content", [])
-
-    for item in content:
-
-        value = item.get("value", "")
+    for item in entry.get("content", []):
 
         match = re.search(
-            r'<img[^>]+src=["\']([^"\']+)["\']',
-            value,
+            r'<img[^>]+src=["\']([^"\']+)',
+            item.get("value", ""),
             re.I
         )
 
         if match:
             return html.unescape(match.group(1))
 
-    # Summary image
-    summary = entry.get("summary", "")
-
     match = re.search(
-        r'<img[^>]+src=["\']([^"\']+)["\']',
-        summary,
+        r'<img[^>]+src=["\']([^"\']+)',
+        entry.get("summary", ""),
         re.I
     )
 
@@ -220,114 +254,49 @@ def get_image(entry):
     return None
 
 
-# ==========================================
-# DOWNLOAD IMAGE
-# ==========================================
+# =====================================
+# FETCH ARTICLE DETAILS
+# =====================================
 
-def download_image(image_url):
-
-    if not image_url:
-        return None
+def get_article_details(url):
 
     try:
-
-        response = requests.get(
-            image_url,
-            headers=HEADERS,
-            timeout=25,
-            stream=True
-        )
-
-        response.raise_for_status()
-
-        content_type = response.headers.get(
-            "Content-Type", ""
-        ).lower()
-
-        if not content_type.startswith("image/"):
-            print("Image skipped: invalid content type")
-            return None
-
-        image_data = response.content
-
-        if not image_data:
-            return None
-
-        # Telegram photo size limit
-        if len(image_data) > 9 * 1024 * 1024:
-            print("Image skipped: too large")
-            return None
-
-        extension = ".jpg"
-
-        if "png" in content_type:
-            extension = ".png"
-
-        elif "webp" in content_type:
-            extension = ".webp"
-
-        return image_data, extension, content_type
-
-    except Exception as error:
-
-        print("Image download error:", error)
-
-        return None
-
-
-# ==========================================
-# TRANSLATION
-# ==========================================
-
-def translate_text(text):
-
-    if not text:
-        return ""
-
-    text = text[:4500]
-
-    try:
-
-        url = "https://api.mymemory.translated.net/get"
-
-        params = {
-            "q": text,
-            "langpair": "en|fa"
-        }
-
-        if TRANSLATION_EMAIL:
-            params["de"] = TRANSLATION_EMAIL
 
         response = requests.get(
             url,
-            params=params,
             headers=HEADERS,
-            timeout=30
+            timeout=25
         )
 
         response.raise_for_status()
 
-        data = response.json()
+        parser = ArticleParser()
 
-        translated = data.get(
-            "responseData", {}
-        ).get("translatedText", "")
+        parser.feed(response.text)
 
-        translated = html.unescape(translated)
+        description = clean_text(parser.description)
 
-        if translated and translated.strip():
-            return translated.strip()
+        paragraphs = parser.paragraphs
+
+        # Use publisher description or a short
+        # factual excerpt from accessible content.
+        details = description
+
+        if not details and paragraphs:
+            details = " ".join(paragraphs[:2])
+
+        return limit_words(details, 120)
 
     except Exception as error:
 
-        print("Translation error:", error)
+        print("Article extraction error:", error)
 
-    return ""
+        return ""
 
 
-# ==========================================
+# =====================================
 # FETCH RSS
-# ==========================================
+# =====================================
 
 def fetch_news():
 
@@ -337,7 +306,7 @@ def fetch_news():
 
         print("Reading RSS:", source["name"])
 
-        source_articles = []
+        found = []
 
         for feed_url in source["urls"]:
 
@@ -353,68 +322,54 @@ def fetch_news():
 
                 feed = feedparser.parse(response.content)
 
-                entries = feed.entries
+                for entry in feed.entries:
 
-                if entries:
+                    title = clean_text(
+                        entry.get("title", "")
+                    )
 
-                    for entry in entries:
+                    link = entry.get("link", "")
 
-                        title = clean_text(
-                            entry.get("title", "")
-                        )
+                    summary = clean_text(
+                        entry.get("summary", "")
+                    )
 
-                        summary = clean_text(
-                            entry.get("summary", "")
-                        )
+                    if not title or not link:
+                        continue
 
-                        link = entry.get("link", "")
+                    if not link.startswith("http"):
+                        continue
 
-                        if not title or not link:
-                            continue
+                    found.append({
+                        "id": entry.get("id") or link,
+                        "title": title,
+                        "summary": summary,
+                        "link": link,
+                        "source": source["name"],
+                        "image": get_image(entry)
+                    })
 
-                        if not link.startswith("http"):
-                            continue
-
-                        article_id = entry.get("id") or link
-
-                        image_url = get_image(entry)
-
-                        article = {
-                            "id": str(article_id),
-                            "title": title,
-                            "summary": summary,
-                            "link": link,
-                            "source": source["name"],
-                            "image": image_url
-                        }
-
-                        source_articles.append(article)
-
-                    if source_articles:
-                        break
+                if found:
+                    break
 
             except Exception as error:
 
-                print(
-                    "RSS error:",
-                    source["name"],
-                    error
-                )
+                print("RSS error:", error)
 
         print(
             "Articles found:",
-            len(source_articles),
+            len(found),
             source["name"]
         )
 
-        articles.extend(source_articles)
+        articles.extend(found)
 
     return articles
 
 
-# ==========================================
-# MOVIE NEWS FILTER
-# ==========================================
+# =====================================
+# FILTER
+# =====================================
 
 def is_movie_news(article):
 
@@ -429,41 +384,199 @@ def is_movie_news(article):
     )
 
 
-# ==========================================
-# UNIQUE ID
-# ==========================================
+# =====================================
+# TRANSLATION
+# =====================================
 
-def make_id(article):
+def translate_text(text):
 
-    value = article["id"] or article["link"]
+    if not text:
+        return ""
 
-    return hashlib.sha256(
-        value.encode("utf-8")
-    ).hexdigest()
+    try:
+
+        response = requests.get(
+            "https://api.mymemory.translated.net/get",
+            params={
+                "q": text[:4500],
+                "langpair": "en|fa"
+            },
+            headers=HEADERS,
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        result = data.get(
+            "responseData", {}
+        ).get("translatedText", "")
+
+        return html.unescape(result).strip()
+
+    except Exception as error:
+
+        print("Translation error:", error)
+
+        return ""
 
 
-# ==========================================
+# =====================================
+# IMAGE DOWNLOAD AND RESIZE
+# =====================================
+
+def download_image(url):
+
+    if not url:
+        return None
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        if not response.headers.get(
+            "Content-Type", ""
+        ).lower().startswith("image/"):
+
+            return None
+
+        if len(response.content) > 9 * 1024 * 1024:
+            return None
+
+        image = Image.open(
+            BytesIO(response.content)
+        )
+
+        image = image.convert("RGB")
+
+        image.thumbnail((1280, 1280))
+
+        output = BytesIO()
+
+        image.save(
+            output,
+            format="JPEG",
+            quality=88,
+            optimize=True
+        )
+
+        output.seek(0)
+
+        return output
+
+    except Exception as error:
+
+        print("Image error:", error)
+
+        return None
+
+
+# =====================================
+# TELEGRAM PHOTO
+# =====================================
+
+def send_photo(image):
+
+    if image is None:
+        return False
+
+    try:
+
+        response = requests.post(
+            API + "/sendPhoto",
+            data={
+                "chat_id": CHANNEL_ID
+            },
+            files={
+                "photo": ("news.jpg", image, "image/jpeg")
+            },
+            timeout=60
+        )
+
+        if not response.ok:
+
+            print(
+                "Photo error:",
+                response.text
+            )
+
+            return False
+
+        return response.json().get("ok", False)
+
+    except Exception as error:
+
+        print("Photo send error:", error)
+
+        return False
+
+
+# =====================================
+# TELEGRAM MESSAGE
+# =====================================
+
+def send_message(message):
+
+    try:
+
+        response = requests.post(
+            API + "/sendMessage",
+            data={
+                "chat_id": CHANNEL_ID,
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            },
+            timeout=45
+        )
+
+        if not response.ok:
+
+            print(
+                "Message error:",
+                response.text
+            )
+
+            return False
+
+        return response.json().get("ok", False)
+
+    except Exception as error:
+
+        print("Message send error:", error)
+
+        return False
+
+
+# =====================================
 # BUILD POST
-# ==========================================
+# =====================================
 
-def build_message(article, english_summary, persian_title, persian_summary):
+def build_post(article, english, persian_title, persian):
 
-    title_en = telegram_safe(article["title"])
+    title_en = html.escape(article["title"])
 
-    title_fa = telegram_safe(persian_title)
+    title_fa = html.escape(persian_title)
 
-    english = telegram_safe(english_summary)
+    english = html.escape(english)
 
-    persian = telegram_safe(persian_summary)
+    persian = html.escape(persian)
 
-    source = telegram_safe(article["source"])
+    source = html.escape(article["source"])
 
     link = html.escape(
         article["link"],
         quote=True
     )
 
-    message = (
+    return (
         "🎬 <b>IMDBNEWS | اخبار سینمای جهان</b>\n\n"
 
         "🇬🇧 <b>ORIGINAL NEWS</b>\n\n"
@@ -482,190 +595,78 @@ def build_message(article, english_summary, persian_title, persian_summary):
 
         f"📰 منبع: {source}\n\n"
 
-        f'🔗 <a href="{link}">مشاهده خبر اصلی</a>\n\n'
+        f'🔗 <a href="{link}">مشاهده خبر اصلی | Read Original News</a>\n\n'
 
         "📢 @IMDBNEWS_FA"
     )
 
-    return message
 
-
-# ==========================================
-# TELEGRAM SEND MESSAGE
-# ==========================================
-
-def send_message(message):
-
-    url = f"{TELEGRAM_API}/sendMessage"
-
-    payload = {
-        "chat_id": CHANNEL_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-
-    try:
-
-        response = requests.post(
-            url,
-            data=payload,
-            timeout=40
-        )
-
-        if not response.ok:
-
-            print(
-                "Telegram message error:",
-                response.status_code,
-                response.text[:1000]
-            )
-
-            return False
-
-        result = response.json()
-
-        return result.get("ok", False)
-
-    except Exception as error:
-
-        print("Send message error:", error)
-
-        return False
-
-
-# ==========================================
-# TELEGRAM SEND PHOTO
-# ==========================================
-
-def send_photo(image_data):
-
-    url = f"{TELEGRAM_API}/sendPhoto"
-
-    try:
-
-        image_bytes, extension, content_type = image_data
-
-        files = {
-            "photo": (
-                "news_image" + extension,
-                image_bytes,
-                content_type
-            )
-        }
-
-        payload = {
-            "chat_id": CHANNEL_ID
-        }
-
-        response = requests.post(
-            url,
-            data=payload,
-            files=files,
-            timeout=60
-        )
-
-        if not response.ok:
-
-            print(
-                "Telegram photo error:",
-                response.status_code,
-                response.text[:1000]
-            )
-
-            return False
-
-        return response.json().get("ok", False)
-
-    except Exception as error:
-
-        print("Send photo error:", error)
-
-        return False
-
-
-# ==========================================
+# =====================================
 # PROCESS ARTICLE
-# ==========================================
+# =====================================
 
 def process_article(article):
 
     print("Processing:", article["title"])
 
-    title_fa = translate_text(
+    # Get additional accessible details
+    details = get_article_details(
+        article["link"]
+    )
+
+    english = article["summary"]
+
+    if details and len(details) > len(english):
+        english = details
+
+    if not english:
+        english = article["title"]
+
+    english = limit_words(english, 120)
+
+    persian_title = translate_text(
         article["title"]
     )
 
-    if not title_fa:
+    persian = translate_text(english)
 
-        print("Skipped: title translation failed")
-
+    if not persian_title or not persian:
+        print("Translation failed")
         return False
 
-    english_summary = article["summary"]
-
-    if not english_summary:
-        english_summary = article["title"]
-
-    # Limit original text
-    english_summary = english_summary[:2200]
-
-    persian_summary = translate_text(
-        english_summary
-    )
-
-    if not persian_summary:
-
-        print("Skipped: summary translation failed")
-
-        return False
-
-    persian_summary = persian_summary[:2200]
-
-    message = build_message(
+    message = build_post(
         article,
-        english_summary,
-        title_fa,
-        persian_summary
+        english,
+        persian_title,
+        persian
     )
 
-    # Telegram message limit
     if len(message) > 4000:
+        print("Message too long")
+        return False
 
-        message = message[:3950] + "\n\n📢 @IMDBNEWS_FA"
-
-    # Try photo first
-    image_data = download_image(
+    image = download_image(
         article.get("image")
     )
 
-    if image_data:
-
-        photo_sent = send_photo(image_data)
-
-        if photo_sent:
+    if image:
+        if send_photo(image):
             print("Photo published")
-
         else:
-            print("Photo failed - sending text only")
+            print("Photo failed; text fallback")
 
-    # Send complete bilingual post
-    message_sent = send_message(message)
-
-    if message_sent:
+    if send_message(message):
 
         print("Published:", article["title"])
 
         return True
 
-    print("Message publication failed")
-
     return False
 
 
-# ==========================================
+# =====================================
 # MAIN
-# ==========================================
+# =====================================
 
 def main():
 
@@ -675,7 +676,7 @@ def main():
 
     if not BOT_TOKEN or not CHANNEL_ID:
 
-        print("ERROR: Telegram secrets are missing")
+        print("Missing Telegram secrets")
 
         return
 
@@ -688,10 +689,7 @@ def main():
 
     articles = fetch_news()
 
-    print(
-        "Total articles:",
-        len(articles)
-    )
+    print("Total articles:", len(articles))
 
     new_articles = []
 
@@ -721,9 +719,7 @@ def main():
         if count >= MAX_NEWS:
             break
 
-        success = process_article(article)
-
-        if success:
+        if process_article(article):
 
             published.append(
                 article["unique_id"]
@@ -736,12 +732,7 @@ def main():
         time.sleep(3)
 
     print("================================")
-
-    print(
-        "Published news:",
-        count
-    )
-
+    print("Published news:", count)
     print("IMDBNEWS BOT FINISHED")
 
 
