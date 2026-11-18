@@ -432,3 +432,107 @@ def publish_article(article):
         send_message(message)
 
     print("News published:", article["title"])
+
+# =====================================
+# MAIN ENGINE
+# =====================================
+
+def main():
+
+    print("================================")
+    print("IMDBNEWS BOT STARTED")
+    print("================================")
+
+    if not BOT_TOKEN or not CHANNEL_ID:
+
+        raise RuntimeError(
+            "Telegram settings are missing"
+        )
+
+    published = load_database()
+
+    published_ids = set(published)
+
+    print(
+        "Previously published:",
+        len(published_ids)
+    )
+
+    articles = get_news()
+
+    print(
+        "Total articles:",
+        len(articles)
+    )
+
+    new_articles = []
+
+    for article in articles:
+
+        if article["id"] in published_ids:
+            continue
+
+        if not is_movie_news(article):
+            continue
+
+        new_articles.append(article)
+
+    print(
+        "New movie news:",
+        len(new_articles)
+    )
+
+    if not new_articles:
+
+        print("No new news found.")
+
+        return
+
+    sent_count = 0
+
+    for article in new_articles[:MAX_NEWS]:
+
+        try:
+
+            publish_article(article)
+
+            published.append(
+                article["id"]
+            )
+
+            published_ids.add(
+                article["id"]
+            )
+
+            save_database(published)
+
+            sent_count += 1
+
+            time.sleep(3)
+
+        except Exception as error:
+
+            print(
+                "PUBLISH ERROR:",
+                str(error)
+            )
+
+    print("================================")
+
+    print(
+        "Published news:",
+        sent_count
+    )
+
+    print("IMDBNEWS BOT FINISHED")
+
+    print("================================")
+
+
+# =====================================
+# START
+# =====================================
+
+if __name__ == "__main__":
+
+    main()
