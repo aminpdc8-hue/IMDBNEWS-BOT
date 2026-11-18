@@ -136,3 +136,86 @@ def get_news():
             print("RSS error:", e)
 
     return articles
+    # ============== MAIN ==============
+
+def main():
+
+    print("IMDBNEWS BOT STARTED")
+
+    if not BOT_TOKEN or not CHANNEL_ID:
+        print("ERROR: Telegram settings are missing")
+        return
+
+    published = load_database()
+
+    print("Loading RSS feeds...")
+
+    articles = get_news()
+
+    print("Total articles:", len(articles))
+
+    new_articles = []
+
+    for article in articles:
+
+        article_id = article.get("id")
+
+        if not article_id:
+            continue
+
+        if article_id in published:
+            continue
+
+        if not is_movie_news(article):
+            continue
+
+        new_articles.append(article)
+
+    print("New movie news:", len(new_articles))
+
+    if not new_articles:
+        print("No new movie news found.")
+        return
+
+    sent_count = 0
+
+    for article in new_articles[:MAX_NEWS]:
+
+        try:
+
+            title = translate(article["title"])
+
+            summary = translate(article["summary"][:2500])
+
+            message = (
+                "🎬 <b>اخبار سینمای جهان</b>\n\n"
+                f"<b>{html.escape(title)}</b>\n\n"
+                f"{html.escape(summary)}\n\n"
+                f"📰 منبع: {html.escape(article['source'])}\n"
+                f"🔗 <a href=\"{html.escape(article['link'], quote=True)}\">مشاهده خبر اصلی</a>\n\n"
+                "📢 @IMDBNEWS_FA"
+            )
+
+            send_message(message)
+
+            published.append(article["id"])
+
+            save_database(published)
+
+            sent_count += 1
+
+            print("Successfully published:", article["title"])
+
+            time.sleep(3)
+
+        except Exception as e:
+
+            print("Publishing error:", str(e))
+
+    print("================================")
+    print("Published news:", sent_count)
+    print("IMDBNEWS BOT FINISHED")
+
+
+if __name__ == "__main__":
+    main()
