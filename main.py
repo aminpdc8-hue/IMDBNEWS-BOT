@@ -2,17 +2,15 @@ import os
 import json
 import time
 import html
+import re
 import requests
 import feedparser
-import re
-
-from deep_translator import GoogleTranslator
-from urllib.parse import quote
 
 # ============== CONFIG ==============
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+TRANSLATION_EMAIL = os.getenv("TRANSLATION_EMAIL", "")
 
 MAX_NEWS = 5
 DATABASE = "published.json"
@@ -32,22 +30,40 @@ KEYWORDS = [
     "streaming", "warner bros", "paramount"
 ]
 
-translator = GoogleTranslator(source="auto", target="fa")
-
 # ============== DATABASE ==============
 
 def load_database():
     try:
         with open(DATABASE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception:
         return []
+
 
 def save_database(data):
     with open(DATABASE, "w", encoding="utf-8") as f:
-        json.dump(data[-1000:], f, ensure_ascii=False)
+        json.dump(
+            data[-1000:],
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
 
-# ============== FILTER ==============
+
+# ============== TEXT CLEANER ==============
+
+def clean_text(text):
+
+    text = re.sub(r"<[^>]+>", " ", text)
+
+    text = html.unescape(text)
+
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+# ============== NEWS FILTER ==============
 
 def is_movie_news(article):
 
@@ -58,6 +74,7 @@ def is_movie_news(article):
 
     return any(word in text for word in KEYWORDS)
 
+
 # ============== TRANSLATION ==============
 
 def translate(text):
@@ -65,45 +82,90 @@ def translate(text):
     if not text:
         return ""
 
-    for attempt in range(3):
-        try:
-            result = translator.translate(text[:4500])
-            time.sleep(2)
-            return result
+    words = text.split()
 
-        except Exception as e:
-            print("Translation error:", e)
-            time.sleep(10 * (attempt + 1))
+    chunks = []
+    current = ""
 
-    return "ترجمه این بخش موقتاً در دسترس نیست."
+    for word in words:
 
-# ============== TELEGRAM ==============
+        if len(current) + len(word) + 1 > 400:
 
-def send_message(message):
+            if current:
+                chunks.append(current)
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            current = word
 
-    response = requests.post(
-        url,
-        data={
-            "chat_id": CHANNEL_ID,
-            "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False
-        },
-        timeout=30
-    )
+        else:
+            current = (current + " " + word).strip()
 
-    response.raise_for_status()
+    if current:
+        chunks.append(current)
 
-    result = response.json()
+    translated = []
 
-    if not result.get("ok"):
-        raise Exception(result)
+    for chunk in chunks:
 
-# ============== NEWS ENGINE ==============
+        success = False
 
-# ============== NEWS ENGINE ==============
+        for attempt in range(3):
+
+            try:
+
+                params = {
+                    "q": chunk,
+                    "langpair": "en|fa"
+                }
+
+                if TRANSLATION_EMAIL:
+                    params["de"] = TRANSLATION_EMAIL
+
+                response = requests.get(
+                    "https://api.mymemory.translated.net/get",
+                    params=params,
+                    timeout=30
+                )
+
+                response.raise_for_status()
+
+                data = response.json()
+
+                if str(data.get("responseStatus")) != "200":
+                    raise Exception(
+                        data.get("responseDetails", "Translation failed")
+                    )
+
+                result = data.get(
+                    "responseData", {}
+                ).get("translatedText", "")
+
+                if not result:
+                    raise Exception("Empty translation")
+
+                translated.append(clean_text(result))
+
+                success = True
+
+                time.sleep(2)
+
+                break
+
+            except Exception as e:
+
+                print("Translation error:", str(e))
+
+                time.sleep(5 * (attempt + 1))
+
+        if not success:
+
+            print("Translation failed permanently.")
+
+            return None
+
+    return " ".join(translated)
+
+
+# ============== RSS NEWS ENGINE ==============
 
 def get_news():
 
@@ -112,43 +174,131 @@ def get_news():
     for source in SOURCES:
 
         try:
-            feed = feedparser.parse(source)
+
+            print("Reading RSS:", source)
+
+            response = requests.get(
+                source,
+                headers={
+                    "User-Agent": "Mozilla/5.0 IMDBNEWS BOT"
+                },
+                timeout=30
+            )
+
+            response.raise_for_status()
+
+            feed = feedparser.parse(response.content)
+
+            print(
+                "Articles found:",
+                len(feed.entries)
+            )
 
             for item in feed.entries:
 
+                article_id = (
+                    item.get("id")
+                    or item.get("link", "")
+                )
+
+                if not article_id:
+                    continue
+
+                summary = item.get("summary", "")
+
+                if not summary:
+                    summary = item.get("description", "")
+
                 article = {
-                    "id": item.get("id") or item.get("link", ""),
-                    "title": item.get("title", ""),
-                    "summary": re.sub(
-                        r"<[^>]+>",
-                        " ",
-                        item.get("summary", "")
+
+                    "id": article_id,
+
+                    "title": clean_text(
+                        item.get("title", "")
                     ),
+
+                    "summary": clean_text(summary),
+
                     "link": item.get("link", ""),
+
                     "source": feed.feed.get(
-                        "title", "Cinema News"
+                        "title",
+                        "Cinema News"
                     )
                 }
 
                 articles.append(article)
 
         except Exception as e:
-            print("RSS error:", e)
+
+            print("RSS error:", str(e))
 
     return articles
-    # ============== MAIN ==============
+
+
+# ============== TELEGRAM ==============
+
+def send_message(message):
+
+    if not BOT_TOKEN or not CHANNEL_ID:
+
+        raise Exception(
+            "Telegram settings are missing!"
+        )
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/sendMessage"
+    )
+
+    response = requests.post(
+
+        url,
+
+        data={
+
+            "chat_id": CHANNEL_ID,
+
+            "text": message,
+
+            "parse_mode": "HTML",
+
+            "disable_web_page_preview": False
+        },
+
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    result = response.json()
+
+    if not result.get("ok"):
+
+        raise Exception(str(result))
+
+    return True
+
+
+# ============== MAIN ENGINE ==============
 
 def main():
 
+    print("================================")
     print("IMDBNEWS BOT STARTED")
+    print("================================")
 
     if not BOT_TOKEN or not CHANNEL_ID:
-        print("ERROR: Telegram settings are missing")
+
+        print("ERROR: Telegram configuration missing")
+
         return
 
     published = load_database()
 
-    print("Loading RSS feeds...")
+    print("Published database:", len(published))
+
+    print("Getting latest cinema news...")
 
     articles = get_news()
 
@@ -156,14 +306,16 @@ def main():
 
     new_articles = []
 
+    seen = set(published)
+
     for article in articles:
 
-        article_id = article.get("id")
+        article_id = article["id"]
 
-        if not article_id:
+        if article_id in seen:
             continue
 
-        if article_id in published:
+        if not article["title"]:
             continue
 
         if not is_movie_news(article):
@@ -171,10 +323,14 @@ def main():
 
         new_articles.append(article)
 
+        seen.add(article_id)
+
     print("New movie news:", len(new_articles))
 
     if not new_articles:
+
         print("No new movie news found.")
+
         return
 
     sent_count = 0
@@ -183,16 +339,50 @@ def main():
 
         try:
 
+            print("--------------------------------")
+            print("Translating:", article["title"])
+
             title = translate(article["title"])
 
-            summary = translate(article["summary"][:2500])
+            if not title:
+
+                print("Skipping article: title translation failed")
+
+                continue
+
+            summary = translate(
+                article["summary"][:1200]
+            )
+
+            if not summary:
+
+                print("Skipping article: summary translation failed")
+
+                continue
+
+            title = html.escape(title)
+
+            summary = html.escape(summary)
+
+            source = html.escape(article["source"])
+
+            link = html.escape(
+                article["link"],
+                quote=True
+            )
 
             message = (
+
                 "🎬 <b>اخبار سینمای جهان</b>\n\n"
-                f"<b>{html.escape(title)}</b>\n\n"
-                f"{html.escape(summary)}\n\n"
-                f"📰 منبع: {html.escape(article['source'])}\n"
-                f"🔗 <a href=\"{html.escape(article['link'], quote=True)}\">مشاهده خبر اصلی</a>\n\n"
+
+                f"<b>{title}</b>\n\n"
+
+                f"{summary}\n\n"
+
+                f"📰 منبع: {source}\n"
+
+                f'🔗 <a href="{link}">مشاهده خبر اصلی</a>\n\n'
+
                 "📢 @IMDBNEWS_FA"
             )
 
@@ -204,18 +394,20 @@ def main():
 
             sent_count += 1
 
-            print("Successfully published:", article["title"])
+            print(
+                "SUCCESSFULLY PUBLISHED:",
+                article["title"]
+            )
 
-            time.sleep(3)
+            time.sleep(5)
 
         except Exception as e:
 
-            print("Publishing error:", str(e))
+            print(
+                "PUBLISHING ERROR:",
+                str(e)
+            )
 
     print("================================")
-    print("Published news:", sent_count)
-    print("IMDBNEWS BOT FINISHED")
 
-
-if __name__ == "__main__":
-    main()
+    print("Published news
