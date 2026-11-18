@@ -21,6 +21,10 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 IMDBNEWS BOT"
 }
 
+# =====================================
+# NEWS SOURCES
+# =====================================
+
 SOURCES = [
     {
         "name": "IMDb",
@@ -47,7 +51,8 @@ KEYWORDS = [
     "series", "season", "trailer", "casting",
     "oscar", "golden globe", "box office",
     "streaming", "warner bros", "paramount",
-    "television", "filmmaker", "festival"
+    "television", "filmmaker", "festival",
+    "tv", "cinematography", "screenplay"
 ]
 
 # =====================================
@@ -57,8 +62,101 @@ KEYWORDS = [
 def load_database():
 
     try:
-        with open(D
-                  # =====================================
+        with open(DATABASE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        return data if isinstance(data, list) else []
+
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+
+
+def save_database(data):
+
+    with open(DATABASE, "w", encoding="utf-8") as file:
+
+        json.dump(
+            data[-1000:],
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
+# =====================================
+# TEXT CLEANER
+# =====================================
+
+def clean_text(value):
+
+    value = re.sub(r"<[^>]+>", " ", value or "")
+    value = html.unescape(value)
+
+    return re.sub(r"\s+", " ", value).strip()
+
+
+# =====================================
+# IMAGE EXTRACTOR
+# =====================================
+
+def get_image(item):
+
+    media = item.get("media_content", [])
+
+    for image in media:
+
+        image_url = image.get("url", "")
+
+        if image_url:
+            return image_url
+
+    thumbnails = item.get("media_thumbnail", [])
+
+    for image in thumbnails:
+
+        image_url = image.get("url", "")
+
+        if image_url:
+            return image_url
+
+    enclosures = item.get("enclosures", [])
+
+    for image in enclosures:
+
+        image_url = image.get("href", "")
+        image_type = image.get("type", "")
+
+        if image_url and image_type.startswith("image/"):
+            return image_url
+
+    contents = item.get("content", [])
+
+    for content in contents:
+
+        match = re.search(
+            r'<img[^>]+src=["\']([^"\']+)["\']',
+            content.get("value", ""),
+            re.IGNORECASE
+        )
+
+        if match:
+            return html.unescape(match.group(1))
+
+    summary = item.get("summary", "")
+
+    match = re.search(
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+        summary,
+        re.IGNORECASE
+    )
+
+    if match:
+        return html.unescape(match.group(1))
+
+    return None
+
+
+# =====================================
 # NEWS FILTER
 # =====================================
 
@@ -141,7 +239,9 @@ def translate(text):
                 data = response.json()
 
                 if str(data.get("responseStatus")) != "200":
-                    raise RuntimeError("Translation failed")
+                    raise RuntimeError(
+                        data.get("responseDetails", "Translation failed")
+                    )
 
                 result = data.get(
                     "responseData", {}
@@ -179,14 +279,13 @@ def translate(text):
 def get_news():
 
     articles = []
-
     seen_links = set()
 
     for source in SOURCES:
 
         try:
 
-            print("Reading:", source["name"])
+            print("Reading RSS:", source["name"])
 
             response = requests.get(
                 source["url"],
@@ -200,7 +299,8 @@ def get_news():
 
             print(
                 "Articles found:",
-                len(feed.entries)
+                len(feed.entries),
+                source["name"]
             )
 
             for item in feed.entries:
@@ -258,6 +358,7 @@ def get_news():
 
     return articles
 
+
 # =====================================
 # TELEGRAM API
 # =====================================
@@ -284,6 +385,10 @@ def telegram_request(method, data):
     return result
 
 
+# =====================================
+# SEND MESSAGE
+# =====================================
+
 def send_message(message):
 
     telegram_request(
@@ -296,6 +401,10 @@ def send_message(message):
         }
     )
 
+
+# =====================================
+# SEND PHOTO
+# =====================================
 
 def send_photo(image_url, caption):
 
@@ -330,9 +439,10 @@ def build_message(article, fa_title, fa_summary):
     )
 
     message = (
+
         "🎬 <b>IMDBNEWS | اخبار سینمای جهان</b>\n\n"
 
-        "🇬🇧 <b>ORIGINAL NEWS</b>\n"
+        "🇬🇧 <b>ORIGINAL NEWS</b>\n\n"
 
         f"<b>{original_title}</b>\n\n"
 
@@ -340,24 +450,25 @@ def build_message(article, fa_title, fa_summary):
 
         "━━━━━━━━━━━━━━\n\n"
 
-        "🇮🇷 <b>ترجمه فارسی</b>\n"
+        "🇮🇷 <b>ترجمه فارسی</b>\n\n"
 
         f"<b>{translated_title}</b>\n\n"
 
         f"{translated_summary}\n\n"
 
-        f"📰 منبع: {source}\n"
+        f"📰 منبع: {source}\n\n"
 
         f'<a href="{link}">🔗 مشاهده خبر اصلی</a>\n\n'
 
         "📢 @IMDBNEWS_FA"
+
     )
 
     return message
 
 
 # =====================================
-# PUBLISH NEWS
+# PUBLISH ARTICLE
 # =====================================
 
 def publish_article(article):
@@ -369,6 +480,7 @@ def publish_article(article):
     )
 
     if not fa_title:
+
         raise RuntimeError("Title translation failed")
 
     original_summary = article["summary"][:1200]
@@ -378,15 +490,22 @@ def publish_article(article):
     ) if original_summary else ""
 
     if original_summary and not fa_summary:
+
         raise RuntimeError("Summary translation failed")
 
+    article_for_message = dict(article)
+
+    article_for_message["summary"] = original_summary
+
     message = build_message(
-        article,
+        article_for_message,
         fa_title,
         fa_summary or ""
     )
 
     image_url = article.get("image")
+
+    # Telegram photo caption limit
 
     if image_url and len(message) <= 1000:
 
@@ -397,7 +516,7 @@ def publish_article(article):
                 message
             )
 
-            print("Photo published")
+            print("Photo published successfully")
 
         except Exception as error:
 
@@ -410,7 +529,7 @@ def publish_article(article):
         try:
 
             caption = (
-                "🎬 <b>IMDBNEWS</b>\n"
+                "🎬 <b>IMDBNEWS</b>\n\n"
                 f"<b>{html.escape(fa_title)}</b>"
             )
 
@@ -431,7 +550,8 @@ def publish_article(article):
 
         send_message(message)
 
-    print("News published:", article["title"])
+    print("Published:", article["title"])
+
 
 # =====================================
 # MAIN ENGINE
@@ -484,7 +604,7 @@ def main():
 
     if not new_articles:
 
-        print("No new news found.")
+        print("No new movie news found.")
 
         return
 
@@ -495,6 +615,8 @@ def main():
         try:
 
             publish_article(article)
+
+            # Save only after successful publication
 
             published.append(
                 article["id"]
@@ -514,6 +636,7 @@ def main():
 
             print(
                 "PUBLISH ERROR:",
+                article["title"],
                 str(error)
             )
 
