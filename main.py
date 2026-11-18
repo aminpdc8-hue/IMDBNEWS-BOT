@@ -103,6 +103,8 @@ def send_message(message):
 
 # ============== NEWS ENGINE ==============
 
+# ============== NEWS ENGINE ==============
+
 def get_news():
 
     articles = []
@@ -114,12 +116,23 @@ def get_news():
 
             for item in feed.entries:
 
-                articles.append({
-                    "id": item.get("id") or item.get("link"),
+                article = {
+                    "id": item.get("id") or item.get("link", ""),
                     "title": item.get("title", ""),
                     "summary": re.sub(
-                        r"<[^>]+>", " ",
+                        r"<[^>]+>",
+                        " ",
                         item.get("summary", "")
                     ),
                     "link": item.get("link", ""),
-                    "source": feed.feed.get
+                    "source": feed.feed.get(
+                        "title", "Cinema News"
+                    )
+                }
+
+                articles.append(article)
+
+        except Exception as e:
+            print("RSS error:", e)
+
+    return articles
